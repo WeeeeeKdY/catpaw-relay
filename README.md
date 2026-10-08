@@ -225,6 +225,63 @@ python3 catpaw-anthropic-relay.py --port 8790
 - Relay 会自动退避重试（0/2/4 秒），如果仍然失败，会丢弃旧会话创建新会话
 - 如果持续出现，可能是上游确实在处理上一轮，等几秒再发请求
 
+## CLI: cc-switch
+
+一个命令行工具，直接操作 CC Switch 的 SQLite 数据库，无需打开桌面应用即可切换 provider。
+
+### 安装
+
+```bash
+# 直接使用（推荐）
+npx @weeeeekdy/cc-switch
+
+# 或全局安装
+npm install -g @weeeeekdy/cc-switch
+```
+
+### 用法
+
+```bash
+# 查看当前各 app 的 provider
+npx cc-switch
+# → claude: 美团Claude [custom] ●
+# → codex:  mc-codex [custom] ●
+
+# 列出所有 provider
+npx cc-switch list
+npx cc-switch list --app codex
+
+# 切换 provider
+npx cc-switch use "CatPaw Relay"
+npx cc-switch use "美团Claude" --app claude
+
+# 查看当前 provider 详情（URL、Key、Model）
+npx cc-switch current
+
+# 添加自定义 provider
+npx cc-switch add "My Provider" --url http://localhost:8789 --key my-api-key
+
+# 删除 provider
+npx cc-switch rm "My Provider"
+
+# 代理开关
+npx cc-switch proxy          # 查看代理状态
+npx cc-switch proxy on       # 开启代理
+npx cc-switch proxy off      # 关闭代理
+
+# 健康检查
+npx cc-switch health
+
+# 帮助
+npx cc-switch help
+```
+
+### 支持的 app
+
+`claude` · `codex` · `gemini` · `grokbuild` · `claude-desktop` · `openclaw` · `hermes`
+
+默认显示 `claude` 和 `codex`，其他 app 通过 `--app` 指定。
+
 ## 许可证
 
 MIT

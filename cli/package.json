@@ -1,0 +1,24 @@
+{
+  "name": "@weeeeekdy/cc-switch",
+  "version": "1.0.0",
+  "description": "CLI for CC Switch — switch Claude Code / Codex providers from the command line",
+  "type": "module",
+  "bin": {
+    "cc-switch": "./index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "keywords": [
+    "claude-code",
+    "codex",
+    "provider",
+    "switch",
+    "cc-switch"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WeeeeeKdY/catpaw-relay.git"
+  }
+}
