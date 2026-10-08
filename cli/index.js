@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 /**
- * cc-switch — CLI for CC Switch
+ * catpaw-switch — CLI for CC Switch
  *
  * Switch Claude Code / Codex / Gemini / GrokBuild providers from the command line.
  * Reads and writes the CC Switch SQLite database (~/.cc-switch/cc-switch.db).
  *
  * Usage:
- *   npx cc-switch                     — show current provider for each app
- *   npx cc-switch list [--app claude]  — list all providers
- *   npx cc-switch use <name> [--app claude]  — switch to a provider
- *   npx cc-switch add <name> --url <url> --key <key> [--app claude]
- *   npx cc-switch rm <name> [--app claude]   — remove a provider
- *   npx cc-switch current [--app claude]     — show current provider details
- *   npx cc-switch health [--app claude]      — check provider health
- *   npx cc-switch proxy [--app claude]       — show proxy config
- *   npx cc-switch proxy on [--app claude]    — enable proxy
- *   npx cc-switch proxy off [--app claude]   — disable proxy
+ *   npx catpaw-switch                     — show current provider for each app
+ *   npx catpaw-switch list [--app claude]  — list all providers
+ *   npx catpaw-switch use <name> [--app claude]  — switch to a provider
+ *   npx catpaw-switch add <name> --url <url> --key <key> [--app claude]
+ *   npx catpaw-switch rm <name> [--app claude]   — remove a provider
+ *   npx catpaw-switch current [--app claude]     — show current provider details
+ *   npx catpaw-switch health [--app claude]      — check provider health
+ *   npx catpaw-switch proxy [--app claude]       — show proxy config
+ *   npx catpaw-switch proxy on [--app claude]    — enable proxy
+ *   npx catpaw-switch proxy off [--app claude]   — disable proxy
  */
 
 import { execSync } from "node:child_process";
@@ -189,7 +189,7 @@ function cmdUse(appType, name) {
   const provider = getProviderByName(appType, name);
   if (!provider) {
     console.error(`Provider "${name}" not found for ${appType}`);
-    console.error(`Run "${bold("cc-switch list --app " + appType)}" to see available providers.`);
+    console.error(`Run "${bold("catpaw-switch list --app " + appType)}" to see available providers.`);
     process.exit(1);
   }
   switchTo(appType, provider.id);
@@ -340,7 +340,7 @@ function main() {
     case "switch": {
       const name = positional[0];
       if (!name) {
-        console.error("Usage: cc-switch use <provider-name> [--app claude]");
+        console.error("Usage: catpaw-switch use <provider-name> [--app claude]");
         process.exit(1);
       }
       cmdUse(app, name);
@@ -355,7 +355,7 @@ function main() {
     case "add": {
       const name = positional[0];
       if (!name || !flags.url) {
-        console.error("Usage: cc-switch add <name> --url <url> --key <api-key> [--app claude]");
+        console.error("Usage: catpaw-switch add <name> --url <url> --key <api-key> [--app claude]");
         process.exit(1);
       }
       cmdAdd(app, name, flags.url, flags.key || "");
@@ -367,7 +367,7 @@ function main() {
     case "delete": {
       const name = positional[0];
       if (!name) {
-        console.error("Usage: cc-switch rm <provider-name> [--app claude]");
+        console.error("Usage: catpaw-switch rm <provider-name> [--app claude]");
         process.exit(1);
       }
       cmdRm(app, name);
@@ -388,32 +388,32 @@ function main() {
     case "--help":
     case "-h":
       console.log(`
-${bold("cc-switch")} — CLI for CC Switch
+${bold("catpaw-switch")} — CLI for CC Switch
 
 ${bold("Usage:")}
-  npx cc-switch                                Show current providers
-  npx cc-switch list [--app claude]             List all providers
-  npx cc-switch use <name> [--app claude]       Switch to a provider
-  npx cc-switch current [--app claude]          Show current provider details
-  npx cc-switch add <name> --url <url> --key <key>  Add a provider
-  npx cc-switch rm <name> [--app claude]        Remove a provider
-  npx cc-switch proxy [on|off] [--app claude]   Show/toggle proxy
-  npx cc-switch health [--app claude]           Show provider health
+  npx catpaw-switch                                Show current providers
+  npx catpaw-switch list [--app claude]             List all providers
+  npx catpaw-switch use <name> [--app claude]       Switch to a provider
+  npx catpaw-switch current [--app claude]          Show current provider details
+  npx catpaw-switch add <name> --url <url> --key <key>  Add a provider
+  npx catpaw-switch rm <name> [--app claude]        Remove a provider
+  npx catpaw-switch proxy [on|off] [--app claude]   Show/toggle proxy
+  npx catpaw-switch health [--app claude]           Show provider health
 
 ${bold("Apps:")} ${VALID_APPS.join(", ")}
 ${bold("Default:")} claude, codex
 
 ${bold("Examples:")}
-  npx cc-switch use "CatPaw Relay"
-  npx cc-switch use "美团Claude" --app claude
-  npx cc-switch list --app codex
-  npx cc-switch proxy on
+  npx catpaw-switch use "CatPaw Relay"
+  npx catpaw-switch use "美团Claude" --app claude
+  npx catpaw-switch list --app codex
+  npx catpaw-switch proxy on
 `);
       break;
 
     default:
       console.error(`Unknown command: ${command}`);
-      console.error(`Run "${bold("npx cc-switch help")}" for usage.`);
+      console.error(`Run "${bold("npx catpaw-switch help")}" for usage.`);
       process.exit(1);
   }
 }
