@@ -1,0 +1,14 @@
+{
+  "name": "pi-catpaw-relay-provider",
+  "version": "1.0.0",
+  "description": "CatPaw relay provider for pi — gpt-6-sol / gpt-5.6-luna via local 127.0.0.1:8789",
+  "type": "module",
+  "main": "index.ts",
+  "pi": {
+    "extensions": ["index.ts"]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
