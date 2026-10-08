@@ -1,13 +1,13 @@
 {
   "name": "catpaw-switch",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "CLI for CC Switch — switch Claude Code / Codex providers from the command line",
   "type": "module",
   "bin": {
-    "catpaw-switch": "./index.js"
+    "catpaw-switch": "./catpaw-switch"
   },
   "files": [
-    "index.js"
+    "catpaw-switch"
   ],
   "keywords": [
     "claude-code",
