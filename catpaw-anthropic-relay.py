@@ -8,11 +8,11 @@ CatPaw Anthropic Relay
 
 双通道（协议移植自 pawpass，2026-08 逆向验证）：
 
-  1. 纯文本轮次  -> gateway 通道
+  1. 纯文本与工具调用轮次 -> gateway 通道（默认）
      https://catpaw.sankuai.com/api/gpt/openai/stream
      （IDE 面板端点，userModelTypeCode 路由，官方额度计量）
 
-  2. 含工具 / tool_result 轮次 -> agent 通道
+  2. CATPAW_RELAY_AGENT_CHANNEL=1 时 -> agent 通道（兼容旧实现）
      https://catpaw-agent.sankuai.com
      （FRIDAY agent 中继）
        ① POST /api/oauth/token-exchange   SSO -> agent access_token (~25min)
@@ -213,44 +213,199 @@ def _has_tool_result(messages):
     return False
 
 
+def _delta_tool_calls(delta):
+    """gateway SSE 的 delta 里工具调用增量。
+
+    兼容两种 key：OpenAI 风格 `tool_calls` 与 IDE 实抓的 camelCase `toolCalls`。
+    """
+    if not isinstance(delta, dict):
+        return None
+    return delta.get("toolCalls") or delta.get("tool_calls")
+
+
 # ======================================================================
-# gateway 通道（纯文本）
+# gateway 通道（纯文本 + 工具闭环，对齐 CatPaw IDE 面板实抓协议）
 # ======================================================================
 
-def build_gateway_messages(anthropic):
-    """纯文本轮次：只取 system/user/assistant 文本。"""
+def _gw_tools(anthropic):
+    """Anthropic tools -> agentModeConfig.tools（OpenAI function schema）。
+
+    IDE 实抓：内置工具用 {"toolUseName": name}，自定义工具包在
+    {"toolUseName": "use_mcp_tool", "mcpTools": [schema...]} 里，
+    服务端按 function.name 直接暴露给模型。
+    """
+    mcp_tools = []
+    for tool in anthropic.get("tools") or []:
+        if not isinstance(tool, dict) or not tool.get("name"):
+            continue
+        schema = tool.get("input_schema")
+        if not isinstance(schema, dict):
+            schema = {"type": "object", "properties": {}}
+        mcp_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description") or "",
+                    "parameters": schema,
+                },
+            }
+        )
+    return mcp_tools
+
+
+def build_gateway_body(anthropic, code):
+    """Anthropic Messages 整体转 gateway /api/gpt/openai/stream 请求体。
+
+    消息映射：system -> system；user(text) -> user；
+    assistant(tool_use) -> assistant.tool_calls；user(tool_result) -> role=tool。
+    无工具时 agentModeConfig 省略（等价历史纯文本行为）。
+    """
     msgs = []
     sys_text = extract_system(anthropic.get("system"))
     if sys_text:
-        msgs.append({"role": "system", "content": sys_text})
+        msgs.append(
+            {
+                "content": sys_text,
+                "multiModalContent": [{"text": "", "type": "text"}],
+                "role": "system",
+                "triggerMode": "AGENT",
+            }
+        )
+
+    first_user_text = ""
+    last_asst_suuid = None
+
     for m in anthropic.get("messages") or []:
         if not isinstance(m, dict):
             continue
         role = m.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        txt = extract_text(m.get("content"))
-        if txt:
-            msgs.append({"role": role, "content": txt})
+        if role == "user":
+            text_parts, tool_results = [], []
+            for blk in _as_blocks(m.get("content")):
+                if not isinstance(blk, dict):
+                    continue
+                t = blk.get("type")
+                if t == "text":
+                    text_parts.append(blk.get("text", ""))
+                elif t == "tool_result":
+                    tool_results.append(blk)
+            if text_parts:
+                txt = "\n".join(text_parts)
+                if not first_user_text:
+                    first_user_text = txt
+                # IDE 面板同款 <user_query> 包装
+                wrapped = "<user_query>\n%s\n</user_query>" % txt
+                msgs.append(
+                    {
+                        "content": wrapped,
+                        "multiModalContent": [{"text": wrapped, "type": "text"}],
+                        "role": "user",
+                        "triggerMode": "AGENT",
+                    }
+                )
+            for tr in tool_results:
+                out = extract_text(tr.get("content")) or ""
+                msgs.append(
+                    {
+                        "content": out,
+                        "multiModalContent": [{"text": out, "type": "text"}],
+                        "role": "tool",
+                        "tool_call_id": tr.get("tool_use_id") or "",
+                        "suggestUuid": last_asst_suuid,
+                        "triggerMode": "AGENT",
+                    }
+                )
+        elif role == "assistant":
+            texts, calls = [], []
+            for blk in _as_blocks(m.get("content")):
+                if not isinstance(blk, dict):
+                    continue
+                t = blk.get("type")
+                if t == "text" and blk.get("text"):
+                    texts.append(blk["text"])
+                elif t == "tool_use":
+                    calls.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": blk.get("name") or "unknown",
+                                "arguments": json.dumps(
+                                    blk.get("input") or {}, ensure_ascii=False
+                                ),
+                            },
+                            "id": blk.get("id") or ("call_" + uuid.uuid4().hex[:24]),
+                        }
+                    )
+            if not texts and not calls:
+                continue
+            if not first_user_text and texts:
+                first_user_text = "\n".join(texts)
+            txt = "\n".join(texts)
+            last_asst_suuid = str(uuid.uuid4())
+            entry = {
+                "content": txt,
+                "multiModalContent": [{"text": txt, "type": "text"}],
+                "role": "assistant",
+                "suggestUuid": last_asst_suuid,
+                "triggerMode": "AGENT",
+            }
+            if calls:
+                entry["tool_calls"] = calls
+            msgs.append(entry)
+
     if not msgs:
-        msgs.append({"role": "user", "content": "Hello"})
-    return msgs
+        msgs.append(
+            {
+                "content": "Hello",
+                "multiModalContent": [{"text": "Hello", "type": "text"}],
+                "role": "user",
+                "triggerMode": "AGENT",
+            }
+        )
 
+    if not first_user_text:
+        first_user_text = "hello"
+    # 同一会话多轮保持 conversationId 稳定（利于服务端 prompt 缓存命中）
+    conversation_id = "relay-" + _short_hash(first_user_text[:512])
 
-def call_gateway_stream(msgs, code, token, misid):
     body = {
+        "messages": msgs,
+        "conversationId": conversation_id,
         "triggerMode": "AGENT",
         "userModelTypeCode": code,
         "userModelParams": {"context": "204800", "thinking": "true", "effort": "high"},
-        "messages": msgs,
-        "conversationId": "relay-" + uuid.uuid4().hex[:16],
     }
+    mcp_tools = _gw_tools(anthropic)
+    if mcp_tools:
+        body["agentModeConfig"] = {
+            "id": "general-agent",
+            "type": "AGENT",
+            "agentDescription": (
+                "General-purpose agent for researching complex questions, "
+                "searching for code, and executing multi-step tasks."
+            ),
+            "tools": [{"toolUseName": "use_mcp_tool", "mcpTools": mcp_tools}],
+        }
+    return body
+
+
+def call_gateway_stream(body, token, misid):
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "Cookie": "1d47d6ff96_ssoid=%s; f32a546874_ssoid=%s" % (token, token),
+        "access-token": token,
+        "Catpaw-Cookie": "1d47d6ff96_ssoid=%s" % token,
         "ide-type": "CatPaw IDE",
         "client-type": "CatPaw IDE",
+        "client-env": "LOCAL_IDE",
+        "client-id": "1d47d6ff96",
+        "plugin-id": "mt-idekit.mt-idekit-code",
+        "platform-info": "darwin-arm64",
+        # 实测关键开关：服务端凭 UI-Version 判定 webview 面板身份，
+        # 缺失时 agentModeConfig.tools 会被静默丢弃（无工具闭环）。
+        "UI-Version": "0.2.5",
         "user-mis-id": misid,
         "user-uid": misid,
         "mis-id": misid,
@@ -259,7 +414,7 @@ def call_gateway_stream(msgs, code, token, misid):
     }
     req = urllib.request.Request(
         UPSTREAM + "/api/gpt/openai/stream",
-        data=json.dumps(body).encode("utf-8"),
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers=headers,
     )
     return urllib.request.urlopen(req, timeout=600, context=_ssl_ctx)
@@ -930,10 +1085,12 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
 
         stream = bool(body.get("stream"))
-        tool_configs = build_tool_configs(body)
-        use_agent = bool(tool_configs) or _has_tool_result(body.get("messages"))
+        # gateway 通道为主（对齐 IDE：工具闭环同样走 gateway）；
+        # 仅当环境变量 CATPAW_RELAY_AGENT_CHANNEL=1 时强制走旧 agent 通道。
+        use_agent = os.environ.get("CATPAW_RELAY_AGENT_CHANNEL") == "1"
 
         if use_agent:
+            tool_configs = build_tool_configs(body)
             log(
                 "请求: model=%s tools=%d msgs=%d (agent 通道)"
                 % (req_model, len(tool_configs), len(body.get("messages") or []))
@@ -962,10 +1119,18 @@ class RelayHandler(BaseHTTPRequestHandler):
             else:
                 self._handle_agent_non_stream(catpaw_resp, req_model, sess, items, full_sig, first_ev)
         else:
-            msgs = build_gateway_messages(body)
-            log("请求: model=%s msgs=%d (gateway 通道)" % (req_model, len(msgs)))
+            log(
+                "请求: model=%s tools=%d msgs=%d (gateway 通道)"
+                % (
+                    req_model,
+                    len(body.get("tools") or []),
+                    len(body.get("messages") or []),
+                )
+            )
             try:
-                catpaw_resp = call_gateway_stream(msgs, code, token, misid)
+                catpaw_resp = call_gateway_stream(
+                    build_gateway_body(body, code), token, misid
+                )
             except urllib.error.HTTPError as e:
                 raw = b""
                 try:
@@ -986,7 +1151,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             else:
                 self._handle_non_stream(catpaw_resp, req_model)
 
-    # ---------- gateway 响应转换（纯文本） ----------
+    # ---------- gateway 响应转换（纯文本 + 工具调用） ----------
 
     def _handle_non_stream(self, catpaw_resp, req_model):
         text_parts = []
@@ -1022,10 +1187,10 @@ class RelayHandler(BaseHTTPRequestHandler):
                 usage_out = u.get("completion_tokens", usage_out)
             choices = d.get("choices") or []
             delta = (choices[0].get("delta") or {}) if choices else {}
-            content = delta.get("content")
-            if content:
-                text_parts.append(content)
-            acc.add(delta.get("tool_calls"))
+            text_delta = delta.get("content")
+            if text_delta:
+                text_parts.append(text_delta)
+            acc.add(_delta_tool_calls(delta))
 
         content = []
         text = "".join(text_parts)
@@ -1142,7 +1307,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                         {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": content}},
                     )
 
-                for oi, fragment in acc.add(delta.get("tool_calls")):
+                for oi, fragment in acc.add(_delta_tool_calls(delta)):
                     ai = block_index_of.get(oi)
                     if ai is None:
                         ai = next_ai
@@ -1453,8 +1618,8 @@ def main():
     token, _ = get_token()
     log("CatPaw Anthropic Relay 启动")
     log("  监听: %s:%d" % (HOST, PORT))
-    log("  gateway: %s (纯文本)" % UPSTREAM)
-    log("  agent:   %s (工具闭环)" % AGENT_BASE)
+    log("  主通道:  %s (gateway, 对齐 IDE：纯文本+工具闭环, UI-Version 门控)" % UPSTREAM)
+    log("  降级:    %s (agent 通道, CATPAW_RELAY_AGENT_CHANNEL=1 启用)" % AGENT_BASE)
     log("  SSO token: %s" % ("已加载" if token else "未找到（请先登录 CatPaw IDE）"))
     log("  默认模型: %s" % DEFAULT_MODEL)
 
