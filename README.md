@@ -225,6 +225,15 @@ python3 catpaw-anthropic-relay.py --port 8790
 - Relay 会自动退避重试（0/2/4 秒），如果仍然失败，会丢弃旧会话创建新会话
 - 如果持续出现，可能是上游确实在处理上一轮，等几秒再发请求
 
+**Gemini 系模型报 `400 Duplicate function declaration found: xxx`：**
+- 原因：Gemini 系模型（`gemini-4-carbon` / `gemini-4-argon`）的 agent 服务端自带一套内置函数声明，
+  客户端工具与其中某个重名（实测：`write`、`read_file`、`grep`、`task`、`delete_file`、
+  `web_fetch`、`list_dir`、`codebase_search`）就会被拒。
+- Relay 会自动处理：这些名字在发给上游前加 `pi_` 前缀，回传时还原原名；
+  另外首次请求会预读首帧，遇到报错里出现新的重名会自动加入名单并重试（最多 4 次）。
+- 若日志出现 `工具名冲突，自动改名重试: xxx -> pi_xxx` 属于正常自愈行为。
+- GPT / GLM / LongCat 系模型没有这个限制，工具名原样透传。
+
 ## CLI: catpaw-switch
 
 一个命令行工具，直接操作 CC Switch 的 SQLite 数据库，无需打开桌面应用即可切换 provider。

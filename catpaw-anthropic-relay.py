@@ -62,16 +62,24 @@ MODEL_MAP = {
     "gpt-6-astra": 95,
     "gpt-6.1-sol": 102,
     "gpt-6.1-luna": 103,
+    # CatPaw 在线 Agent 模型目录，核实于 2026-11-26；保留旧 ID。
+    "gpt-6.1-terra": 106,
+    "gpt-6.2-sol": 108,
+    "gpt-6.2-astra": 109,  # 上游要求自定义 Friday AppID。
     "gpt-5.6-sol": 82,
     "gpt-5.6-luna": 81,
     "gpt-5.6-terra": 80,
     "deepseek-v4-pro": 64,
     "deepseek-v4-flash": 63,
     "deepseek-v4.1-flash": 97,
+    "deepseek-v4.1-flash-1017": 97,  # 当前展示名，兼容原有别名。
     "kimi-k3": 83,
+    "kimi-k3.1-pro": 105,
     "kimi-k2.7-code": 78,
     "longcat-2.0": 77,
+    "longcat-2.5": 107,
     "glm-5.3": 89,
+    "glm-5.4": 111,
     "glm-5.3-flash": 91,
     "glm-5.3-flash-advisor": 96,
     "glm-5.3-flashx": 98,
@@ -82,6 +90,8 @@ MODEL_MAP = {
     "gemini-3.6-flash": 84,
     "gemini-3.7-flash": 90,
     "gemini-3.8-flash": 94,
+    "gemini-4-argon": 104,
+    "gemini-4-carbon": 110,
     "claude-opus-5.5": 99,
     "hy4-preview": 93,
 }
@@ -227,6 +237,147 @@ def _delta_tool_calls(delta):
 # gateway 通道（纯文本 + 工具闭环，对齐 CatPaw IDE 面板实抓协议）
 # ======================================================================
 
+# ======================================================================
+# 工具名消毒（避免与上游 Gemini agent 内置函数声明重名）
+# ======================================================================
+# Gemini 系模型（gemini-4-carbon / gemini-4-argon …）的 agent 服务端自带
+# 一套内置函数声明；客户端再声明同名工具就会被拒：
+#   400 INVALID_ARGUMENT "Duplicate function declaration found: <name>"
+# 名单是实测枚举出来的（read / edit / bash / glob / ls / todo 等不冲突，
+# 所以不能靠“全部改名”之外的一刀切，只对已知冲突名加前缀）。
+# 未知冲突由 do_POST 里的自动重试兜底：解析报错名 -> 加入本集合 -> 重发。
+RESERVED_TOOL_NAMES = {
+    "write",
+    "read_file",
+    "grep",
+    "task",
+    "delete_file",
+    "web_fetch",
+    "list_dir",
+    "codebase_search",
+}
+TOOL_PREFIX = "pi_"
+_DUP_DECL_RE = re.compile(r"Duplicate function declaration found:\s*([A-Za-z0-9_\-]+)")
+
+
+def _safe_tool_name(name):
+    """发给上游前：与内置声明冲突的工具名加前缀。"""
+    if not name:
+        return name
+    return TOOL_PREFIX + name if name in RESERVED_TOOL_NAMES else name
+
+
+def _restore_tool_name(name):
+    """回给客户端前：把加过前缀的工具名还原成原名。"""
+    if not name:
+        return name
+    if name.startswith(TOOL_PREFIX):
+        base = name[len(TOOL_PREFIX):]
+        if base in RESERVED_TOOL_NAMES:
+            return base
+    return name
+
+
+def _dup_name_added(text):
+    """从上游报错文本里抠出冲突工具名并加入 RESERVED_TOOL_NAMES。
+
+    返回 True 表示新增了一条，可以重建请求体重试。
+    """
+    m = _DUP_DECL_RE.search(text or "")
+    if not m:
+        return False
+    name = m.group(1)
+    if name in RESERVED_TOOL_NAMES:
+        return False
+    RESERVED_TOOL_NAMES.add(name)
+    log("工具名冲突，自动改名重试: %s -> %s%s" % (name, TOOL_PREFIX, name))
+    return True
+
+
+class _PrefetchedStream:
+    """把预读出来的行接在原始 response 前面，保持 readline() 语义。"""
+
+    def __init__(self, resp, pre):
+        self._resp = resp
+        self._buf = list(reversed(pre or []))
+
+    def readline(self, *args):
+        if self._buf:
+            return self._buf.pop()
+        return self._resp.readline(*args)
+
+    def close(self):
+        try:
+            self._resp.close()
+        except Exception:
+            pass
+
+
+def open_gateway_stream(body, code, token, misid):
+    """打开 gateway 流并预读首帧，遇工具重名自动改名重试。
+
+    上游把错误包在 HTTP 200 的 SSE 体里（statusCode 字段），
+    所以不能只捕 HTTPError，这里先读第一帧判断再返回。
+    返回 (stream, err_text)：err_text 非 None 表示失败。
+    """
+    for _attempt in range(4):
+        gw_body = build_gateway_body(body, code)
+        try:
+            resp = call_gateway_stream(gw_body, token, misid)
+        except urllib.error.HTTPError as e:
+            raw = b""
+            try:
+                raw = e.read()
+            except Exception:
+                pass
+            text = raw.decode("utf-8", "replace")
+            if _dup_name_added(text):
+                continue
+            return None, "upstream gateway HTTP %s: %s" % (e.code, text[:300])
+        except Exception as e:
+            return None, "upstream gateway error: %s" % e
+
+        pre, err_text = [], None
+        for raw in resp:
+            line = raw.decode("utf-8", "replace")
+            stripped = line.strip()
+            if not stripped.startswith("data:"):
+                pre.append(raw)
+                continue
+            payload = stripped[5:].strip()
+            d = None
+            if payload and payload != "[DONE]":
+                try:
+                    d = json.loads(payload)
+                except Exception:
+                    d = None
+            if isinstance(d, dict):
+                sc = d.get("statusCode")
+                if sc not in (None, 0, "0"):
+                    msg = d.get("msg") or d.get("message") or d.get("content") or ""
+                    if _dup_name_added(str(msg)):
+                        err_text = "retry"
+                    else:
+                        err_text = "upstream statusCode=%s: %s" % (sc, msg)
+                    break
+            pre.append(raw)
+            break
+        if err_text == "retry":
+            try:
+                resp.close()
+            except Exception:
+                pass
+            continue
+        if err_text:
+            try:
+                resp.close()
+            except Exception:
+                pass
+            return None, err_text
+        return _PrefetchedStream(resp, pre), None
+    return None, "工具名重名重试次数超限"
+
+
 def _gw_tools(anthropic):
     """Anthropic tools -> agentModeConfig.tools（OpenAI function schema）。
 
@@ -245,7 +396,7 @@ def _gw_tools(anthropic):
             {
                 "type": "function",
                 "function": {
-                    "name": tool["name"],
+                    "name": _safe_tool_name(tool["name"]),
                     "description": tool.get("description") or "",
                     "parameters": schema,
                 },
@@ -329,7 +480,7 @@ def build_gateway_body(anthropic, code):
                         {
                             "type": "function",
                             "function": {
-                                "name": blk.get("name") or "unknown",
+                                "name": _safe_tool_name(blk.get("name") or "unknown"),
                                 "arguments": json.dumps(
                                     blk.get("input") or {}, ensure_ascii=False
                                 ),
@@ -1127,24 +1278,12 @@ class RelayHandler(BaseHTTPRequestHandler):
                     len(body.get("messages") or []),
                 )
             )
-            try:
-                catpaw_resp = call_gateway_stream(
-                    build_gateway_body(body, code), token, misid
-                )
-            except urllib.error.HTTPError as e:
-                raw = b""
-                try:
-                    raw = e.read()
-                except Exception:
-                    pass
-                self._anthropic_error(
-                    e.code or 502,
-                    "api_error",
-                    "upstream gateway HTTP %s: %s" % (e.code, raw[:300].decode("utf-8", "replace")),
-                )
-                return
-            except Exception as e:
-                self._anthropic_error(502, "api_error", "upstream gateway error: %s" % e)
+            # Gemini 系模型可能因工具名与内置函数声明重名而 400（错误包在
+            # HTTP 200 的 SSE 体里），open_gateway_stream 会预读首帧、
+            # 自动给冲突名加前缀并重试。
+            catpaw_resp, gw_err = open_gateway_stream(body, code, token, misid)
+            if gw_err is not None:
+                self._anthropic_error(502, "api_error", gw_err)
                 return
             if stream:
                 self._handle_stream(catpaw_resp, req_model)
@@ -1201,7 +1340,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 {
                     "type": "tool_use",
                     "id": cur["id"] or ("toolu_" + uuid.uuid4().hex[:10]),
-                    "name": cur["name"] or "unknown",
+                    "name": _restore_tool_name(cur["name"]) or "unknown",
                     "input": _parse_tool_args(cur["args"]),
                 }
             )
@@ -1324,7 +1463,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                                 "content_block": {
                                     "type": "tool_use",
                                     "id": cur["id"] or ("toolu_" + uuid.uuid4().hex[:10]),
-                                    "name": cur["name"] or "unknown",
+                                    "name": _restore_tool_name(cur["name"]) or "unknown",
                                     "input": {},
                                 },
                             },
